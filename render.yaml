@@ -1,0 +1,13 @@
+services:
+  - type: web             # Web service (HTTP)
+    name: hackathon-app   # Service name on Render
+    env: python           # Python environment
+    plan: free            # Render plan (can be free, starter, etc.)
+    region: oregon        # Optional: deployment region
+    branch: main          # Git branch to deploy
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:               # Optional environment variables
+      - key: DATABASE_URL
+        fromDatabase: hackathons-db  # If using a Render database
+    autoDeploy: true       # Auto deploy on git push
