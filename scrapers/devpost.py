@@ -1,67 +1,100 @@
 from playwright.sync_api import sync_playwright
-from datetime import datetime
+from bs4 import BeautifulSoup
+import time
 
-def fetch_hackathons(max_pages=10):
-    hackathons = []
+BASE_URLS = [
+    "https://devpost.com/hackathons",
+    "https://devpost.com/hackathons?search=ai",
+    "https://devpost.com/hackathons?search=blockchain",
+    "https://devpost.com/hackathons?search=machine+learning",
+]
+
+def fetch_hackathons():
+    hackathons = {}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(
+            user_agent="Mozilla/5.0",
+            viewport={"width": 1400, "height": 900}
+        )
+        page = context.new_page()
 
-        for page_num in range(1, max_pages + 1):
-            url = f"https://devpost.com/hackathons?page={page_num}"
-            print(f"Scraping Devpost page {page_num}")
+        for url in BASE_URLS:
+            print(f"\n🔍 Scraping Devpost: {url}")
 
-            page.goto(url, timeout=60000)
-            page.wait_for_selector("div.hackathon-tile", timeout=30000)
+            page.goto(url, wait_until="networkidle", timeout=60000)
 
-            cards = page.query_selector_all("div.hackathon-tile")
+            # Accept cookies if present
+            try:
+                page.locator("button:has-text('Accept')").first.click(timeout=3000)
+            except:
+                pass
+
+            prev_count = 0
+
+            # Infinite scroll
+            for _ in range(10):
+                page.mouse.wheel(0, 4000)
+                time.sleep(2)
+
+                soup = BeautifulSoup(page.content(), "html.parser")
+                cards = soup.select("a[href*='.devpost.com']")
+
+                if len(cards) == prev_count:
+                    break
+                prev_count = len(cards)
+
+            soup = BeautifulSoup(page.content(), "html.parser")
+
+            # REAL selector
+            cards = soup.select("a[href*='.devpost.com']:has(h3)")
+
+            print(f"➡️ Found {len(cards)} cards")
 
             for card in cards:
-                try:
-                    name = card.query_selector("h3.mb-4").inner_text().strip()
-
-                    link = card.query_selector(
-                        "a.flex-row.tile-anchor"
-                    ).get_attribute("href")
-
-                    prize_div = card.query_selector("div.prize span.prize-amount")
-                    prize = prize_div.inner_text().strip() if prize_div else None
-
-                    participants_div = card.query_selector("div.participants strong")
-                    participants = (
-                        participants_div.inner_text().strip()
-                        if participants_div else None
-                    )
-
-                    dates_div = card.query_selector("div.submission-period")
-                    try:
-                        start_str, end_str = dates_div.inner_text().strip().split(" - ")
-                        start_date = datetime.strptime(start_str, "%b %d, %Y").date()
-                        end_date = datetime.strptime(end_str, "%b %d, %Y").date()
-                    except:
-                        start_date = end_date = datetime.today().date()
-
-                    location_div = card.query_selector("div.info span")
-                    location = (
-                        location_div.inner_text().strip()
-                        if location_div else "Online"
-                    )
-
-                    hackathons.append({
-                        "name": name,
-                        "platform": "Devpost",
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "location": location,
-                        "link": link,
-                        "prize": prize,
-                        "participants": participants
-                    })
-
-                except Exception:
+                name_el = card.select_one("h3")
+                if not name_el:
                     continue
+
+                link = card.get("href")
+                if not link.startswith("http"):
+                    link = "https://devpost.com" + link
+
+                if link in hackathons:
+                    continue
+
+                # Try to extract image URL from the card
+                image_url = None
+                img_el = card.select_one("img")
+                if img_el:
+                    image_url = img_el.get("src") or img_el.get("data-src") or img_el.get("data-srcset")
+                    if image_url and not image_url.startswith("http"):
+                        image_url = "https://devpost.com" + image_url
+
+                hackathons[link] = {
+                    "name": name_el.text.strip(),
+                    "platform": "Devpost",
+                    "link": link,
+                    "location": "Online",
+                    "image_url": image_url,
+                }
+
+                print(
+                    f"Name: {name_el.text.strip()}\n"
+                    f"Platform: Devpost\n"
+                    f"Location: Online\n"
+                    f"Image: {image_url}\n"
+                    f"Link: {link}\n"
+                    f"{'-'*40}"
+                )
 
         browser.close()
 
-    return hackathons
+    print(f"\n✅ Devpost unique hackathons scraped: {len(hackathons)}")
+    return list(hackathons.values())
+
+
+if __name__ == "__main__":
+    fetch_hackathons()
+

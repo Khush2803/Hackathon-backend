@@ -1,51 +1,120 @@
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
+from datetime import datetime
+import hashlib
+
 from .models import Hackathon
 
-def get_hackathons(db: Session, platform: str | None = None, skip: int = 0, limit: int = 100):
+
+# ---------- HELPERS ---------- #
+
+def safe_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def generate_external_id(h):
     """
-    Retrieves hackathons from the database with optional platform filtering and pagination.
+    Stable, platform-scoped unique identity
     """
-    query = db.query(Hackathon)
-    if platform:
-        query = query.filter(Hackathon.platform == platform)
-    return query.offset(skip).limit(limit).all()
+    if h.get("link"):
+        return f"{h['platform']}::{h['link'].strip()}"
+
+    raw = (
+        f"{h.get('platform')}|"
+        f"{h.get('name')}|"
+        f"{h.get('start_date')}|"
+        f"{h.get('end_date')}"
+    )
+    return f"{h.get('platform')}::" + hashlib.sha256(raw.encode()).hexdigest()
+
+
+# ---------- CORE LOGIC ---------- #
 
 def upsert_hackathons(db: Session, hackathons: list):
-    """
-    Inserts new hackathons and skips duplicates based on the 'link' field.
-    Returns the number of new hackathons added.
-    """
-    added_count = 0
+    # Get row count with error handling
+    try:
+        existing_count = db.query(Hackathon).count()
+    except OperationalError:
+        print("⚠️ Could not get existing row count (connection issue), proceeding anyway...")
+        existing_count = "unknown"
+    
+    print("📦 Rows already in DB:", existing_count)
+
+    # ✅ DEDUPE INPUT FIRST (CRITICAL)
+    unique_input = {}
+    for h in hackathons:
+        eid = generate_external_id(h)
+        unique_input[eid] = h  # last one wins
+
+    hackathons = list(unique_input.values())
+
+    inserted = 0
+    updated = 0
+    skipped = 0
+
+    # ✅ USE external_id as the ONLY identity
+    existing = {
+        h.external_id: h
+        for h in db.query(Hackathon).all()
+    }
 
     for h in hackathons:
-        if not h.get("link"):
+        external_id = generate_external_id(h)
+        existing_row = existing.get(external_id)
+
+        if existing_row:
+            changed_fields = []
+
+            for field in ["prize", "participants", "location", "start_date", "end_date", "image_url"]:
+                new_val = h.get(field)
+                if new_val and getattr(existing_row, field) != new_val:
+                    setattr(existing_row, field, new_val)
+                    changed_fields.append(field)
+
+            if changed_fields:
+                updated += 1
+                print(f"🔄 Updated '{existing_row.name}' - fields: {', '.join(changed_fields)}")
+
+            skipped += 1
             continue
 
-        # Check if this hackathon already exists
-        exists = db.query(Hackathon).filter(Hackathon.link == h["link"]).first()
-        if exists:
-            continue  # Skip duplicates
-
-        # Create new hackathon
+        # ✅ INSERT NEW
         hack = Hackathon(
-            name=h.get("name", ""),
-            platform=h.get("platform", ""),
-            start_date=h.get("start_date"),
-            end_date=h.get("end_date"),
-            location=h.get("location", ""),
-            link=h.get("link", ""),
+            external_id=external_id,
+            name=h.get("name", "Unknown"),
+            platform=h.get("platform", "Unknown"),
+            link=h.get("link"),
+            start_date=safe_date(h.get("start_date")),
+            end_date=safe_date(h.get("end_date")),
+            location=h.get("location"),
             prize=h.get("prize"),
             participants=h.get("participants"),
+            image_url=h.get("image_url"),
         )
 
         db.add(hack)
-        added_count += 1
+        existing[external_id] = hack
+        inserted += 1
 
     try:
         db.commit()
-    except IntegrityError:
-        db.rollback()  # Safety in case something slipped through
-        print("⚠️ Duplicate detected, skipping conflicting entries")
+    except IntegrityError as e:
+        db.rollback()
+        print("❌ DB commit failed:", e)
+        raise
 
-    return added_count
+    print(f"✅ Inserted: {inserted}")
+    print(f"🔄 Updated: {updated}")
+    print(f"⚠️ Skipped: {skipped}")
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(hackathons),
+    }

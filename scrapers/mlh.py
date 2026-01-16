@@ -1,37 +1,65 @@
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+from playwright.sync_api import sync_playwright
+import time
 
-def fetch_mlh():
-    url = "https://mlh.io/seasons/2025/events"
-    response = requests.get(url, timeout=30)
-    soup = BeautifulSoup(response.text, "html.parser")
+MLH_URL = "https://mlh.io/seasons/2026/events"
 
-    hackathons = []
+def fetch_mlh_hackathons():
+    hackathons = {}
 
-    events = soup.select(".event-wrapper")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(MLH_URL, timeout=60000)
+        page.wait_for_timeout(4000)
 
-    for event in events:
-        try:
-            name = event.select_one(".event-name").text.strip()
-            link = "https://mlh.io" + event.select_one("a")["href"]
-            location = event.select_one(".event-location").text.strip()
+        cards = page.locator("div.event-card")
+        count = cards.count()
 
-            date_text = event.select_one(".event-date").text.strip()
-            start_date = end_date = datetime.today().date()  # MLH date varies
+        for i in range(count):
+            try:
+                title = cards.nth(i).locator("h3").inner_text().strip()
+                link_el = cards.nth(i).locator("a[href]")
+                link = link_el.get_attribute("href")
+                if not link.startswith("http"):
+                    link = "https://mlh.io" + link
 
-            hackathons.append({
-                "name": name,
-                "platform": "MLH",
-                "start_date": start_date,
-                "end_date": end_date,
-                "location": location,
-                "link": link,
-                "prize": None,
-                "participants": None
-            })
+                location = cards.nth(i).locator(".event-location").inner_text().strip()
+                date = cards.nth(i).locator(".event-date").inner_text().strip()
 
-        except Exception:
-            continue
+                # Try to extract image URL from the card
+                image_url = None
+                try:
+                    # Try to find an image tag with logo/banner
+                    img_el = cards.nth(i).locator("img")
+                    if img_el.count() > 0:
+                        image_url = img_el.get_attribute("src")
+                        if image_url and not image_url.startswith("http"):
+                            image_url = "https:" + image_url
+                except Exception:
+                    pass
 
-    return hackathons
+                hackathons[link] = {
+                    "name": title,
+                    "platform": "MLH",
+                    "location": location,
+                    "date": date,
+                    "link": link,
+                    "image_url": image_url,
+                }
+
+                print(
+                    f"Name: {title}\nPlatform: MLH\nLocation: {location}\nDate: {date}\nImage: {image_url}\nLink: {link}\n{'-'*40}"
+                )
+
+            except Exception as e:
+                print(f"⚠️ Failed to parse card {i}: {e}")
+
+        browser.close()
+
+    print(f"\n✅ TOTAL MLH hackathons scraped: {len(hackathons)}")
+    return list(hackathons.values())
+
+
+if __name__ == "__main__":
+    fetch_mlh_hackathons()
+

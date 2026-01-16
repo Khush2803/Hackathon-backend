@@ -1,8 +1,11 @@
 import asyncio
 from fastapi import FastAPI
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from .database import Base, engine, SessionLocal
-from .crud import get_hackathons, upsert_hackathons
+from .crud import upsert_hackathons
+from .models import Hackathon
+
 from .scheduler import start_scheduler
 from scrapers.aggregator import fetch_all_hackathons
 import httpx
@@ -54,14 +57,50 @@ def fetch_hackathons(
     platform: str | None = None,
     db: Session = Depends(get_db)
 ):
-    return get_hackathons(db, platform=platform)
+    # Simple get all for now
+    query = db.query(Hackathon)
+    if platform:
+        query = query.filter(Hackathon.platform == platform)
+    return query.all()
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 @app.post("/scrape-now")
-def scrape_now(db: Session = Depends(get_db)):
+def scrape_now():
+    """
+    Scrape hackathons and save to DB with retry logic for SSL connection issues.
+    """
+    # First, fetch all hackathons data
+    print("🔍 Starting scrape...")
     data = fetch_all_hackathons()
-    added = upsert_hackathons(db, data)
-    return {"status": "done", "added": added}
+    print(f"📦 Scraped {len(data)} hackathons")
+
+    # Create a NEW session after scraping to avoid connection timeout
+    db = SessionLocal()
+    max_retries = 3
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            added = upsert_hackathons(db, data)
+            db.close()
+            return {"status": "done", "added": added}
+        except OperationalError as e:
+            retry_count += 1
+            print(f"⚠️ Database connection error (attempt {retry_count}/{max_retries}): {e}")
+            db.close()
+            # Create a fresh session for retry
+            db = SessionLocal()
+            if retry_count < max_retries:
+                print("🔄 Retrying with fresh connection...")
+                continue
+            else:
+                print("❌ Max retries reached. Connection failed.")
+                return {"status": "error", "message": "Database connection failed after retries"}
+        except Exception as e:
+            db.close()
+            print(f"❌ Unexpected error: {e}")
+            return {"status": "error", "message": str(e)}
+
